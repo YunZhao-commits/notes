@@ -1,7 +1,6 @@
-// scripts/index-notes.js
-const fs = require('fs');
-const crypto = require('crypto');
-const path = require('path');
+import fs from 'fs';
+import crypto from 'crypto';
+import path from 'path';
 
 const ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
 const API_TOKEN = process.env.CF_API_TOKEN;
