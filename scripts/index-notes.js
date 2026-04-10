@@ -9,27 +9,28 @@ const INDEX_NAME = process.env.VECTORIZE_INDEX || "yunchu-notes";
 // 清洗 Obsidian 特有语法的函数
 function cleanObsidianMarkdown(text) {
   return text
-    .replace(/^---[\s\S]*?---/m, '') // 移除开头的 YAML Frontmatter 属性
-    .replace(/!\[\[.*?\]\]/g, '')    // 移除图片引用
-    .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, '$2') // [[链接|别名]] -> 别名
-    .replace(/\[\[([^\]]+)\]\]/g, '$1')            // [[链接]] -> 链接名
-    .replace(/[#*`>]/g, '')          // 移除基础 Markdown 符号，保留纯文本语义
-    .replace(/\n+/g, ' ')            // 把多行合并，防止切块时断裂
+    .replace(/^---[\s\S]*?---/m, '') 
+    .replace(/!\[\[.*?\]\]/g, '')    
+    .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, '$2') 
+    .replace(/\[\[([^\]]+)\]\]/g, '$1')            
+    .replace(/[#*`>]/g, '')          
+    .replace(/\n+/g, ' ')            
     .trim();
 }
 
-// 文本切块函数 (按大概的字符长度切，防止超过大模型处理上限)
-function chunkText(text, maxChar = 500) {
+// ⚡ CTO 优化 1：带重叠 (Overlap) 的滑动窗口切块，消除语义断裂
+function chunkText(text, chunkSize = 500, overlap = 100) {
   const chunks = [];
-  let current = 0;
-  while (current < text.length) {
-    chunks.push(text.slice(current, current + maxChar));
-    current += maxChar;
+  let start = 0;
+  while (start < text.length) {
+    chunks.push(text.slice(start, start + chunkSize));
+    // 每次不跳一整块，而是退回 overlap 的长度，形成重叠
+    start += (chunkSize - overlap); 
   }
   return chunks;
 }
 
-// 调用 Cloudflare Workers AI 获取向量 (Embedding)
+// 调用 Cloudflare Workers AI 获取向量
 async function getEmbeddings(textArray) {
   const url = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/ai/run/@cf/baai/bge-base-en-v1.5`;
   const res = await fetch(url, {
@@ -39,7 +40,7 @@ async function getEmbeddings(textArray) {
   });
   if (!res.ok) throw new Error(`AI 请求失败: ${await res.text()}`);
   const data = await res.json();
-  return data.result.data; // 返回向量数组
+  return data.result.data; 
 }
 
 // 写入 Cloudflare Vectorize 数据库
@@ -48,7 +49,7 @@ async function insertIntoVectorize(vectors) {
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${API_TOKEN}`, 'Content-Type': 'application/x-ndjson' },
-    body: vectors.map(v => JSON.stringify(v)).join('\n') // Vectorize API 要求 ndjson 格式
+    body: vectors.map(v => JSON.stringify(v)).join('\n') 
   });
   if (!res.ok) throw new Error(`插入 Vectorize 失败: ${await res.text()}`);
 }
@@ -73,22 +74,25 @@ async function main() {
 
     if (chunks.length === 0) continue;
 
-    // 获取向量
     const embeddings = await getEmbeddings(chunks);
     
-    // 组装向量数据库所需的数据格式
-    const vectors = chunks.map((chunkText, index) => ({
-      id: crypto.randomUUID(), // 生成唯一 ID
-      values: embeddings[index], // 768 维的向量数据
-      metadata: {
-        source: fileName,
-        text: chunkText // 把原文本也存进去，方便 AI 提取答案
-      }
-    }));
+    const vectors = chunks.map((chunkText, index) => {
+      // ⚡ CTO 优化 2：计算确定性的 Hash ID，实现精准覆盖，防止旧数据残留污染
+      const hashId = crypto.createHash('md5').update(`${fileName}-chunk-${index}`).digest('hex');
+      
+      return {
+        id: hashId, 
+        values: embeddings[index], 
+        metadata: {
+          source: fileName,
+          chunk_index: index,
+          text: chunkText 
+        }
+      };
+    });
 
-    // 写入数据库
     await insertIntoVectorize(vectors);
-    console.log(`✅ 文件 ${file} 的 ${vectors.length} 个数据块已成功泵入向量库！`);
+    console.log(`✅ 文件 ${file} 的 ${vectors.length} 个数据块 (带Overlap) 已成功泵入并覆盖向量库！`);
   }
 }
 
